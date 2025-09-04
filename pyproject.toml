@@ -14,3 +14,11 @@ dependencies = ["boto3>=1.34"]
 
 [project.scripts]
 dpscan = "dynamodb_parallel_scanx.cli:main"
+
+# 👇 ESTO ES CLAVE PARA SRC LAYOUT
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["dynamodb_parallel_scanx*"]
