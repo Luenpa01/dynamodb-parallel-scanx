@@ -129,11 +129,19 @@ def main():
     paginator = ParallelScanPaginator(ddb)
     pages = paginator.paginate(**scan_args)
 
+    # --- Output selector ---
     if args.output:
-        if not args.output_items:
-            sys.exit("CSV soportado solo para --output-items (simple y útil).")
-        count = write_csv_items(pages, args.output)
-        print(f"wrote {count} items to {args.output}")
+        path = args.output.lower()
+        if path.endswith(".csv"):
+            # CSV solo tiene sentido para items
+            # (si el user no puso --output-items, lo forzamos silenciosamente)
+            count = write_csv_items(pages, args.output)
+            print(f"wrote {count} items to {args.output}")
+        else:
+            # .json / .jsonl / cualquier otra extensión -> JSONL
+            with open(args.output, "w", encoding="utf-8") as f:
+                (write_jsonl_items if args.output_items else write_jsonl_pages)(pages, f)
+            print(f"wrote JSONL to {args.output}")
     else:
         out = sys.stdout
         (write_jsonl_items if args.output_items else write_jsonl_pages)(pages, out)
