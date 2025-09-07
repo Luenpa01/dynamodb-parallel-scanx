@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "dynamodb-parallel-scanx"
-version = "0.1.0"
+dynamic = ["version"]
 description = "Fast parallel scan for DynamoDB with STS AssumeRole and tuned connection pooling."
 readme = "README.md"
 license = {text = "MIT"}
@@ -22,3 +22,6 @@ package-dir = {"" = "src"}
 [tool.setuptools.packages.find]
 where = ["src"]
 include = ["dynamodb_parallel_scanx*"]
+
+[tool.setuptools.dynamic]
+version = { attr = "dynamodb_parallel_scanx.__version__" }
