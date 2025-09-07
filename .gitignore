@@ -52,6 +52,14 @@ coverage.xml
 # Jupyter Notebook
 .ipynb_checkpoints
 
+# Virtualenv
+.venv/
+venv/
+ENV/
+env/
+env.bak/
+
+
 # pyenv
 .python-version
 
