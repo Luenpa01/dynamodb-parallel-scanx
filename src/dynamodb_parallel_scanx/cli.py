@@ -8,38 +8,20 @@ from botocore.exceptions import ClientError, NoCredentialsError, EndpointConnect
 from .paginator import ParallelScanPaginator
 from .sts import build_session, build_ddb_client
 from .io_utils import write_jsonl_items, write_jsonl_pages, write_csv_items
+from .auto_type_probe import probe_attribute_type, build_attribute_value
 
 
 # ----------------------------
 # Helpers
 # ----------------------------
-def _infer_dynamo_type(raw: str):
-    """
-    Inferir tipo Dynamo a partir de una cadena CLI.
-    Devuelve dict estilo Dynamo: {"S": "..."} | {"N": "..."} | {"BOOL": True/False} | {"NULL": True}
-    """
-    if raw is None:
-        return {"NULL": True}
-
-    s = str(raw).strip()
-
-    # NULL
-    if s.lower() in ("null", "none"):
-        return {"NULL": True}
-
-    # BOOL
-    if s.lower() in ("true", "false"):
-        return {"BOOL": s.lower() == "true"}
-
-    # NUMBER (int/float, notación científica permitida)
-    try:
-        float(s)  # valida
-        return {"N": s}
-    except ValueError:
-        pass
-
-    # STRING (fallback)
-    return {"S": s}
+def _strip_wrapping_quotes(s: str) -> str:
+    """Si el valor viene con comillas envueltas (p.ej. '"123"'), las remueve."""
+    if s is None:
+        return s
+    s = str(s).strip()
+    if len(s) >= 2 and ((s[0] == s[-1] == '"') or (s[0] == s[-1] == "'")):
+        return s[1:-1]
+    return s
 
 
 # ----------------------------
@@ -54,6 +36,18 @@ def main():
                    help="Valor del filtro (repetible, en mismo orden que -f). Ej: -v Luis -v ACTIVE")
     p.add_argument("--filter-logic", choices=["AND", "OR"], default="AND",
                    help="Cómo combinar múltiples filtros (-f/-v). Por defecto AND.")
+
+    # Tipado de valores (nuevo: auto por defecto; puede ser único o repetible)
+    p.add_argument("--value-type", action="append",
+                   choices=["auto", "S", "N", "BOOL", "SS", "NS"],
+                   help="Tipo(s) del valor. Si se pasa una sola vez aplica a todos los filtros. "
+                        "Si se repite, debe haber el mismo número que -f/-v. Por defecto: auto.")
+    p.add_argument("--auto-type-sample", type=int, default=20,
+                   help="Muestras para inferencia automática por campo (default: 20).")
+    p.add_argument("--auto-type-index",
+                   help="IndexName para sondeo (opcional, útil si el atributo vive/está proyectado en un GSI).")
+    p.add_argument("--auto-type-fallback", choices=["S", "N", "BOOL"], default="S",
+                   help="Tipo de fallback si no se encuentran muestras para inferir (default: S).")
 
     # --- Dynamo args crudos (compatibles con boto3) ---
     p.add_argument("--table-name", required=True)
@@ -159,6 +153,7 @@ def main():
         # -------- filtros friendly (si NO hay modo crudo) --------
         friendly_fields = getattr(args, "filter_field", None)
         friendly_values = getattr(args, "filter_value", None)
+        value_types = getattr(args, "value_type", None)  # puede ser None, una lista de 1, o lista de N
         already_has_raw = any(
             k in scan_args for k in ("FilterExpression", "ExpressionAttributeNames", "ExpressionAttributeValues")
         )
@@ -167,13 +162,63 @@ def main():
             if not (friendly_fields and friendly_values) or len(friendly_fields) != len(friendly_values):
                 sys.exit("Error: debes pasar el mismo número de --filter-field (-f) y --filter-value (-v).")
 
+            # Normaliza value_types: si None → ['auto'] * N; si 1 → réplica; si N → debe coincidir
+            n = len(friendly_fields)
+            if not value_types:
+                norm_types = ["auto"] * n
+            elif len(value_types) == 1:
+                norm_types = [value_types[0]] * n
+            elif len(value_types) == n:
+                norm_types = value_types
+            else:
+                sys.exit("Error: --value-type debe usarse 1 vez o N veces (N = cantidad de -f/-v).")
+
             expr_parts, expr_names, expr_values = [], {}, {}
-            for i, (field, raw_val) in enumerate(zip(friendly_fields, friendly_values)):
+
+            for i, (field, raw_val, vt) in enumerate(zip(friendly_fields, friendly_values, norm_types)):
                 if not field:
                     sys.exit("Error: --filter-field vacío no es válido.")
+
                 name_key, value_key = f"#f{i}", f":v{i}"
                 expr_names[name_key] = field
-                expr_values[value_key] = _infer_dynamo_type(raw_val)
+
+                # Limpieza de comillas envolventes del valor pasado por CLI
+                normalized_raw = _strip_wrapping_quotes(raw_val)
+
+                # Inferencia/forzado de tipo por campo
+                inferred_type = vt
+                if vt == "auto":
+                    res = probe_attribute_type(
+                        ddb_client=ddb,
+                        table_name=args.table_name,
+                        attribute_name=field,
+                        index_name=args.auto_type_index,
+                        sample_size=args.auto_type_sample,
+                        consistent_read=args.consistent_read,
+                        log=log
+                    )
+                    if res.ddb_type is None:
+                        inferred_type = args.auto_type_fallback
+                        log.warning("[auto-type] '%s' sin muestras; usando fallback=%s", field, inferred_type)
+                    else:
+                        inferred_type = res.ddb_type
+                        if res.counts and len(res.counts) > 1:
+                            log.warning("[auto-type] '%s' tipos mixtos=%s; usando mayoritario=%s",
+                                        field, dict(res.counts), inferred_type)
+                    log.debug("[auto-type] field=%s inferred=%s", field, inferred_type)
+
+                # Arma AttributeValue según tipo decidido
+                try:
+                    key_alias, attr_value = build_attribute_value(inferred_type, normalized_raw)
+                except ValueError as e:
+                    sys.exit(f"Error en build_attribute_value para campo '{field}': {e}")
+
+                # build_attribute_value siempre devuelve ':v0'; reasignamos a nuestro placeholder ':v{i}'
+                if key_alias != value_key:
+                    # renombramos la key para mantener consistencia
+                    attr_value = attr_value  # mismo dict
+                expr_values[value_key] = attr_value
+
                 expr_parts.append(f"({name_key} = {value_key})")
 
             scan_args["FilterExpression"] = f" {args.filter_logic} ".join(expr_parts)
