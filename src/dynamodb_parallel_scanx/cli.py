@@ -86,6 +86,8 @@ def main():
     p.add_argument("--output-items", action="store_true", help="Emit items instead of full pages")
     p.add_argument("--output", help="Ruta de salida. .csv → CSV; .json/.jsonl → JSONL; si se omite → stdout JSONL")
 
+    p.add_argument("--workers", type=int, help="Hilos para el paginator (<= TotalSegments)")
+
     args = p.parse_args()
 
     # ---- Logging setup ----
@@ -231,8 +233,10 @@ def main():
             log.debug("friendly filter: %s", scan_args["FilterExpression"])
 
         # -------- ejecución del scan --------
-        paginator = ParallelScanPaginator(ddb)
+
+        paginator = ParallelScanPaginator(ddb, workers=args.workers, max_retries=3)
         pages = paginator.paginate(**scan_args)
+
 
         # -------- Output selector --------
         if args.output:
