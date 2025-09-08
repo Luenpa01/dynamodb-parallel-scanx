@@ -16,4 +16,4 @@ __all__ = [
     "build_session",
     "build_ddb_client",
 ]
-__version__ = "0.1.1"
+__version__ = "0.1.3"
